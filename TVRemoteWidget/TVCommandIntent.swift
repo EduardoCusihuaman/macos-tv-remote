@@ -31,10 +31,25 @@ struct TVCommandIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult {
+        let id = String(UUID().uuidString.prefix(8))
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        TVRemoteLog.remote.notice(
+            "intent.begin id=\(id, privacy: .public) pid=\(pid) cmd=\(command.rawValue, privacy: .public)"
+        )
+
         do {
-            try await TVOneShotSender().send(command.command)
+            try await TVOneShotSender().send(command.command, id: id)
+            let elapsed = String(describing: start.duration(to: clock.now))
+            TVRemoteLog.remote.notice(
+                "intent.end id=\(id, privacy: .public) duration=\(elapsed, privacy: .public)"
+            )
         } catch {
-            // Widget interactions can't present errors; keep the control responsive.
+            TVRemoteLog.remote.error(
+                "intent.error id=\(id, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
         }
         return .result()
     }

@@ -1,6 +1,11 @@
 import Foundation
+import OSLog
 import Security
 import AndroidTVRemoteControl
+
+enum TVRemoteLog {
+    static let remote = Logger(subsystem: "local.eduardo.tvremote.widget", category: "remote")
+}
 
 enum TVRemoteCoreError: LocalizedError {
     case missingCertificate
@@ -85,8 +90,8 @@ enum TVCommand: String, CaseIterable {
 
 /// Keeps TLS warm briefly so consecutive remote presses avoid reconnecting.
 final class TVOneShotSender {
-    func send(_ command: TVCommand) async throws {
-        try await TVRemoteSession.shared.send(command)
+    func send(_ command: TVCommand, id: String = String(UUID().uuidString.prefix(8))) async throws {
+        try await TVRemoteSession.shared.send(command, id: id)
     }
 }
 
@@ -95,25 +100,87 @@ private actor TVRemoteSession {
 
     private struct PendingCommand {
         let command: TVCommand
+        let id: String
         let continuation: CheckedContinuation<Void, Error>
+        var retries = 0
     }
 
     private var remote: RemoteManager?
-    private var pending: [PendingCommand] = []
+    private var queue: [PendingCommand] = []
+    private var worker: Task<Void, Never>?
     private var isConnecting = false
     private var isPaired = false
     private var connectionGeneration = 0
+    private var connectWaiters: [CheckedContinuation<Void, Error>] = []
     private var idleTask: Task<Void, Never>?
 
-    func send(_ command: TVCommand) async throws {
-        if isPaired, let remote {
-            remote.send(KeyPress(command.key))
-            scheduleIdleDisconnect(generation: connectionGeneration)
+    func send(_ command: TVCommand, id: String) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.append(.init(command: command, id: id, continuation: continuation))
+            idleTask?.cancel()
+            idleTask = nil
+            startWorkerIfNeeded()
+        }
+    }
+
+    private func startWorkerIfNeeded() {
+        guard worker == nil else { return }
+
+        worker = Task { [weak self] in
+            guard let self else { return }
+            await self.runQueue()
+        }
+    }
+
+    private func runQueue() async {
+        while !queue.isEmpty {
+            var item = queue.removeFirst()
+            TVRemoteLog.remote.notice(
+                "command.begin id=\(item.id, privacy: .public) cmd=\(item.command.rawValue, privacy: .public) generation=\(self.connectionGeneration)"
+            )
+
+            do {
+                try await ensureConnected()
+                guard let remote else {
+                    throw RemoteSendError.noConnection
+                }
+
+                try await remote.sendAsync(KeyPress(item.command.key))
+                TVRemoteLog.remote.notice(
+                    "command.payload.done id=\(item.id, privacy: .public) generation=\(self.connectionGeneration)"
+                )
+                item.continuation.resume()
+                scheduleIdleDisconnect(generation: connectionGeneration)
+            } catch let error as RemoteSendError where error.safeToRetry && item.retries == 0 {
+                item.retries += 1
+                TVRemoteLog.remote.warning(
+                    "command.retry id=\(item.id, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
+                closeConnection()
+                queue.insert(item, at: 0)
+            } catch {
+                TVRemoteLog.remote.error(
+                    "command.error id=\(item.id, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
+                closeConnection()
+                item.continuation.resume(throwing: error)
+            }
+        }
+
+        worker = nil
+        if !queue.isEmpty {
+            startWorkerIfNeeded()
+        }
+    }
+
+    private func ensureConnected() async throws {
+        if isPaired, remote != nil {
+            TVRemoteLog.remote.debug("connection.warm generation=\(self.connectionGeneration)")
             return
         }
 
         try await withCheckedThrowingContinuation { continuation in
-            pending.append(.init(command: command, continuation: continuation))
+            connectWaiters.append(continuation)
             guard !isConnecting else { return }
 
             do {
@@ -123,6 +190,7 @@ private actor TVRemoteSession {
                 connectionGeneration += 1
                 let generation = connectionGeneration
 
+                TVRemoteLog.remote.notice("connection.start generation=\(generation)")
                 manager.stateChanged = { [weak self] state in
                     Task { await self?.handle(state, generation: generation) }
                 }
@@ -133,7 +201,7 @@ private actor TVRemoteSession {
                     await self?.connectionTimedOut(generation: generation)
                 }
             } catch {
-                failPending(with: error)
+                failConnectWaiters(error)
             }
         }
     }
@@ -151,26 +219,24 @@ private actor TVRemoteSession {
         )
     }
 
-    private func handle(_ state: RemoteManager.RemoteState, generation: Int) async {
+    private func handle(_ state: RemoteManager.RemoteState, generation: Int) {
         guard generation == connectionGeneration else { return }
 
         switch state {
         case .paired:
             isConnecting = false
             isPaired = true
-
-            let commands = pending
-            pending.removeAll()
-            for item in commands {
-                remote?.send(KeyPress(item.command.key))
-            }
-
-            commands.forEach { $0.continuation.resume() }
-            scheduleIdleDisconnect(generation: generation)
+            TVRemoteLog.remote.notice("connection.paired generation=\(generation)")
+            let waiters = connectWaiters
+            connectWaiters.removeAll()
+            waiters.forEach { $0.resume() }
 
         case .error(let error):
+            TVRemoteLog.remote.error(
+                "connection.error generation=\(generation) error=\(error.localizedDescription, privacy: .public)"
+            )
             closeConnection()
-            failPending(with: error)
+            failConnectWaiters(error)
 
         default:
             break
@@ -179,8 +245,9 @@ private actor TVRemoteSession {
 
     private func connectionTimedOut(generation: Int) {
         guard generation == connectionGeneration, isConnecting else { return }
+        TVRemoteLog.remote.error("connection.timeout generation=\(generation)")
         closeConnection()
-        failPending(with: TVRemoteCoreError.connectionTimedOut)
+        failConnectWaiters(TVRemoteCoreError.connectionTimedOut)
     }
 
     private func scheduleIdleDisconnect(generation: Int) {
@@ -207,10 +274,10 @@ private actor TVRemoteSession {
         isPaired = false
     }
 
-    private func failPending(with error: Error) {
-        let commands = pending
-        pending.removeAll()
-        commands.forEach { $0.continuation.resume(throwing: error) }
+    private func failConnectWaiters(_ error: Error) {
+        let waiters = connectWaiters
+        connectWaiters.removeAll()
+        waiters.forEach { $0.resume(throwing: error) }
     }
 }
 

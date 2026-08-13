@@ -8,6 +8,21 @@
 import Foundation
 import Network
 
+public enum RemoteSendError: Error {
+    case noConnection
+    case prefix(Error)
+    case payload(Error)
+
+    public var safeToRetry: Bool {
+        switch self {
+        case .noConnection, .prefix:
+            return true
+        case .payload:
+            return false
+        }
+    }
+}
+
 public class RemoteManager {
     private let stateQueue = DispatchQueue(label: "remote.state")
     private let remoteQueue = DispatchQueue(label: "remote.connect")
@@ -99,6 +114,28 @@ public class RemoteManager {
     public func send(_ request: RequestDataProtocol) {
         send(Data(Encoder.encodeVarint(UInt(request.data.count))), request.data)
     }
+
+    public func sendAsync(_ request: RequestDataProtocol) async throws {
+        guard let connection else {
+            throw RemoteSendError.noConnection
+        }
+
+        let prefix = Data(Encoder.encodeVarint(UInt(request.data.count)))
+
+        do {
+            try await sendAsync(prefix, on: connection)
+        } catch {
+            failSend(error)
+            throw RemoteSendError.prefix(error)
+        }
+
+        do {
+            try await sendAsync(request.data, on: connection)
+        } catch {
+            failSend(error)
+            throw RemoteSendError.payload(error)
+        }
+    }
     
     public func send(_ data: Data, _ nextData: Data? = nil) {
         logger?.debugLog(logPrefix + "Sending data: \(Array(data))")
@@ -118,6 +155,23 @@ public class RemoteManager {
                 self.send(nextMessage)
             }
         }))
+    }
+
+    private func sendAsync(_ data: Data, on connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+
+    private func failSend(_ error: Error) {
+        remoteState = .error(.sendDataError(error))
+        disconnect()
     }
     
     private func handleConnectionState(_ state: NWConnection.State) {
