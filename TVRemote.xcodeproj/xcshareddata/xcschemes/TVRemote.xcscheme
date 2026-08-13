@@ -21,20 +21,6 @@
                ReferencedContainer = "container:TVRemote.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "YES"
-            buildForProfiling = "YES"
-            buildForArchiving = "YES"
-            buildForAnalyzing = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "0A33814E9337842B22FD7D45"
-               BuildableName = "TVRemoteWidgetExtension.appex"
-               BlueprintName = "TVRemoteWidgetExtension"
-               ReferencedContainer = "container:TVRemote.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

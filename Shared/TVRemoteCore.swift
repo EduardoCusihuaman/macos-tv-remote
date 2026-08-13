@@ -4,12 +4,13 @@ import Security
 import AndroidTVRemoteControl
 
 enum TVRemoteLog {
-    static let remote = Logger(subsystem: "local.eduardo.tvremote.widget", category: "remote")
+    static let remote = Logger(subsystem: "local.eduardo.tvremote", category: "remote")
 }
 
 enum TVRemoteCoreError: LocalizedError {
     case missingCertificate
     case connectionTimedOut
+    case configurationChanged
 
     var errorDescription: String? {
         switch self {
@@ -17,6 +18,8 @@ enum TVRemoteCoreError: LocalizedError {
             return "No encontré cert.der/cert.p12 dentro de la app."
         case .connectionTimedOut:
             return "La TV no respondió a tiempo."
+        case .configurationChanged:
+            return "Cambió la configuración de la TV."
         }
     }
 }
@@ -88,10 +91,26 @@ enum TVCommand: String, CaseIterable {
     }
 }
 
-/// Keeps TLS warm briefly so consecutive remote presses avoid reconnecting.
+/// Keeps TLS warm while the menu is open and briefly after it closes.
 final class TVOneShotSender {
     func send(_ command: TVCommand, id: String = String(UUID().uuidString.prefix(8))) async throws {
         try await TVRemoteSession.shared.send(command, id: id)
+    }
+
+    func activate() async throws {
+        try await TVRemoteSession.shared.setPanelActive(true)
+    }
+
+    func deactivate() async {
+        try? await TVRemoteSession.shared.setPanelActive(false)
+    }
+
+    func reconnect() async throws {
+        try await TVRemoteSession.shared.reconnect()
+    }
+
+    func observeConnection(_ handler: @escaping @Sendable (Bool) -> Void) async {
+        await TVRemoteSession.shared.observeConnection(handler)
     }
 }
 
@@ -113,6 +132,29 @@ private actor TVRemoteSession {
     private var connectionGeneration = 0
     private var connectWaiters: [CheckedContinuation<Void, Error>] = []
     private var idleTask: Task<Void, Never>?
+    private var isPanelActive = false
+    private var connectionHandler: (@Sendable (Bool) -> Void)?
+
+    func observeConnection(_ handler: @escaping @Sendable (Bool) -> Void) {
+        connectionHandler = handler
+        handler(isPaired)
+    }
+
+    func setPanelActive(_ active: Bool) async throws {
+        isPanelActive = active
+        idleTask?.cancel()
+        idleTask = nil
+
+        if active {
+            try await ensureConnected()
+
+            if !isPanelActive {
+                scheduleIdleDisconnect(generation: connectionGeneration)
+            }
+        } else {
+            scheduleIdleDisconnect(generation: connectionGeneration)
+        }
+    }
 
     func send(_ command: TVCommand, id: String) async throws {
         try await withCheckedThrowingContinuation { continuation in
@@ -120,6 +162,15 @@ private actor TVRemoteSession {
             idleTask?.cancel()
             idleTask = nil
             startWorkerIfNeeded()
+        }
+    }
+
+    func reconnect() async throws {
+        closeConnection()
+        failConnectWaiters(TVRemoteCoreError.configurationChanged)
+
+        if isPanelActive {
+            try await ensureConnected()
         }
     }
 
@@ -210,7 +261,7 @@ private actor TVRemoteSession {
         RemoteManager(
             try TVResources.tlsManager(),
             CommandNetwork.DeviceInfo(
-                "Mac TV Widget",
+                "Mac TV Remote",
                 "Mac",
                 "1.0",
                 "TVRemote",
@@ -226,6 +277,7 @@ private actor TVRemoteSession {
         case .paired:
             isConnecting = false
             isPaired = true
+            connectionHandler?(true)
             TVRemoteLog.remote.notice("connection.paired generation=\(generation)")
             let waiters = connectWaiters
             connectWaiters.removeAll()
@@ -252,8 +304,9 @@ private actor TVRemoteSession {
 
     private func scheduleIdleDisconnect(generation: Int) {
         idleTask?.cancel()
+        guard !isPanelActive else { return }
         idleTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(10))
             guard !Task.isCancelled else { return }
             await self?.disconnectIfIdle(generation: generation)
         }
@@ -265,6 +318,7 @@ private actor TVRemoteSession {
     }
 
     private func closeConnection() {
+        let hadConnection = remote != nil || isConnecting || isPaired
         idleTask?.cancel()
         idleTask = nil
         remote?.stateChanged = nil
@@ -272,6 +326,9 @@ private actor TVRemoteSession {
         remote = nil
         isConnecting = false
         isPaired = false
+        if hadConnection {
+            connectionHandler?(false)
+        }
     }
 
     private func failConnectWaiters(_ error: Error) {
@@ -313,9 +370,12 @@ final class TVPairingModel: ObservableObject {
                         self.status = "Emparejamiento completo"
                         self.waitingForPIN = false
                         self.paired = true
+                        manager.stateChanged = nil
                         manager.disconnect()
+                        self.pairing = nil
 
                     case .error(let error):
+                        guard !self.paired else { return }
                         self.status = "Error: \(error.localizedDescription)"
                         self.waitingForPIN = false
 
@@ -326,7 +386,7 @@ final class TVPairingModel: ObservableObject {
             }
 
             pairing = manager
-            manager.connect(TVConfig.host, "Mac TV Widget", "Mac")
+            manager.connect(TVConfig.host, "Mac TV Remote", "Mac")
 
         } catch {
             status = "Error: \(error.localizedDescription)"
