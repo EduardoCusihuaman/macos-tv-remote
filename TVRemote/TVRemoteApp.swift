@@ -210,9 +210,9 @@ private struct RemotePanel: View {
             }
 
             HStack(spacing: 5) {
-                RemoteKeyButton(remote: remote, command: .back, symbol: "chevron.backward", label: "Atrás")
-                RemoteKeyButton(remote: remote, command: .home, symbol: "house.fill", label: "Inicio")
                 RemoteKeyButton(remote: remote, command: .power, symbol: "power", label: "Encender o apagar", role: .destructive)
+                RemoteKeyButton(remote: remote, command: .home, symbol: "house.fill", label: "Inicio")
+                RemoteKeyButton(remote: remote, command: .back, symbol: "chevron.backward", label: "Atrás")
             }
 
             PlaybackControl(remote: remote)
