@@ -42,6 +42,8 @@ Security > Open Anyway**.
 3. Select the link button.
 4. Enter the six-character code shown on the TV.
 
+On first use, Keychain may request access to **Imported Private Key**; enter your Mac password and select **Always Allow**.
+
 ## Update
 
 ```bash

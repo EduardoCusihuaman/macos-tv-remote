@@ -1,5 +1,5 @@
 #!/bin/sh
-set -euo pipefail
+set -eu
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 RESOURCES="$ROOT/Shared/Resources"
@@ -12,7 +12,7 @@ INSTALLED_APP="$INSTALL_DIR/macOS TV Remote.app"
 LEGACY_APP="$INSTALL_DIR/TV Remote.app"
 
 fail() {
-  print -u2 "Error: $1"
+  printf 'Error: %s\n' "$1" >&2
   exit 1
 }
 
@@ -25,8 +25,8 @@ fi
 
 mkdir -p "$RESOURCES" "$INSTALL_DIR"
 
-if [[ ! -f "$DER_CERT" || ! -f "$P12_CERT" ]]; then
-  print "Creating a private pairing identity for this Mac..."
+if [ ! -f "$DER_CERT" ] || [ ! -f "$P12_CERT" ]; then
+  printf '%s\n' "Creating a private pairing identity for this Mac..."
   TEMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -57,7 +57,7 @@ fi
 
 chmod 600 "$DER_CERT" "$P12_CERT"
 
-print "Building macOS TV Remote..."
+printf '%s\n' "Building macOS TV Remote..."
 xcodebuild \
   -quiet \
   -project "$ROOT/TVRemote.xcodeproj" \
@@ -69,9 +69,9 @@ xcodebuild \
   DEVELOPMENT_TEAM= \
   build
 
-[[ -d "$BUILT_APP" ]] || fail "The build completed without producing TVRemote.app."
+[ -d "$BUILT_APP" ] || fail "The build completed without producing TVRemote.app."
 
-print "Installing in $INSTALL_DIR..."
+printf 'Installing in %s...\n' "$INSTALL_DIR"
 pkill -x TVRemote >/dev/null 2>&1 || true
 rm -rf "$INSTALLED_APP" "$LEGACY_APP"
 ditto "$BUILT_APP" "$INSTALLED_APP"
@@ -80,6 +80,5 @@ ditto "$BUILT_APP" "$INSTALLED_APP"
 
 open "$INSTALLED_APP"
 
-print
-print "macOS TV Remote is installed."
-print "Open the menu bar remote, enter your TV IP in Settings, and select Pair."
+printf '\n%s\n' "macOS TV Remote is installed."
+printf '%s\n' "Open the menu bar remote, enter your TV IP in Settings, and select Pair."
