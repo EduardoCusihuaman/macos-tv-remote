@@ -4,6 +4,9 @@
 # Xcode user state and build products
 DerivedData/
 build/
+*.app
+*.dmg
+*.pkg
 *.xcuserstate
 **/xcuserdata/
 *.xccheckout

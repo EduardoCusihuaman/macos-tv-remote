@@ -12,7 +12,7 @@ struct TVRemoteApp: App {
             RemotePanel(remote: remote)
         } label: {
             Image(systemName: "av.remote.fill")
-                .accessibilityLabel("TV Remote")
+                .accessibilityLabel("macOS TV Remote")
         }
         .menuBarExtraStyle(.window)
     }

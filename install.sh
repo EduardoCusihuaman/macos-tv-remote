@@ -2,102 +2,84 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PAIR_DIR="$HOME/.local/share/tvctl"
-CERT_PEM="$PAIR_DIR/cert.pem"
-KEY_PEM="$PAIR_DIR/key.pem"
-HOST_FILE="$PAIR_DIR/host"
-VENDOR="$ROOT/Vendor/AndroidTVRemoteControl"
-RES="$ROOT/Shared/Resources"
+RESOURCES="$ROOT/Shared/Resources"
+DER_CERT="$RESOURCES/cert.der"
+P12_CERT="$RESOURCES/cert.p12"
+BUILD_ROOT="$ROOT/build"
+BUILT_APP="$BUILD_ROOT/DerivedData/Build/Products/Release/TVRemote.app"
+INSTALL_DIR="$HOME/Applications"
+INSTALLED_APP="$INSTALL_DIR/macOS TV Remote.app"
+LEGACY_APP="$INSTALL_DIR/TV Remote.app"
 
-echo "→ TV Remote nativo (Swift only)"
-
-for f in "$CERT_PEM" "$KEY_PEM" "$HOST_FILE"; do
-  [[ -f "$f" ]] || {
-    echo "❌ Falta $f"
-    echo "   Esta primera migración reutiliza el pairing que ya hiciste con tvctl."
-    exit 1
-  }
-done
-
-command -v xcodegen >/dev/null || {
-  echo "❌ Falta XcodeGen: brew install xcodegen"
+fail() {
+  print -u2 "Error: $1"
   exit 1
 }
 
-xcodebuild -version >/dev/null 2>&1 || {
-  echo "❌ Xcode completo no está configurado."
-  exit 1
-}
+command -v xcodebuild >/dev/null 2>&1 || fail "Xcode is required. Install it from the Mac App Store."
+command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required but was not found."
 
-# Si llegaste a probar el bridge Python anterior, lo eliminamos.
-OLD_PLIST="$HOME/Library/LaunchAgents/local.tvremote.bridge.plist"
-if [[ -f "$OLD_PLIST" ]]; then
-  launchctl bootout "gui/$(id -u)" "$OLD_PLIST" 2>/dev/null || true
-  rm -f "$OLD_PLIST"
-fi
-rm -f "$PAIR_DIR/tvbridge.py"
-
-mkdir -p "$RES"
-
-echo "→ Migrando el certificado ya emparejado a formatos nativos…"
-/usr/bin/openssl x509 \
-  -in "$CERT_PEM" \
-  -outform DER \
-  -out "$RES/cert.der"
-
-/usr/bin/openssl pkcs12 -export \
-  -inkey "$KEY_PEM" \
-  -in "$CERT_PEM" \
-  -out "$RES/cert.p12" \
-  -passout pass:tvremote
-
-HOST="$(tr -d '[:space:]' < "$HOST_FILE")"
-cat > "$ROOT/Shared/TVConfig.swift" <<EOF
-import Foundation
-
-enum TVConfig {
-    static let host = "$HOST"
-}
-EOF
-
-if [[ ! -d "$VENDOR/.git" ]]; then
-  echo "→ Descargando AndroidTVRemoteControl (MIT)…"
-  rm -rf "$VENDOR"
-  git clone --depth 1 \
-    https://github.com/odyshewroman/AndroidTVRemoteControl.git \
-    "$VENDOR"
+if ! xcodebuild -version >/dev/null 2>&1; then
+  fail "Select a full Xcode installation with: sudo xcode-select -s /Applications/Xcode.app"
 fi
 
-# El proyecto upstream declara iOS en Package.swift aunque su implementación
-# usa Foundation/Network/Security y es portable. Añadimos macOS al paquete local.
-if ! grep -q '\.macOS(' "$VENDOR/Package.swift"; then
-  /usr/bin/perl -0pi -e 's/platforms: \[\.iOS\(\.v13\)\],/platforms: [.iOS(.v13), .macOS(.v13)],/' "$VENDOR/Package.swift"
-else
-  /usr/bin/perl -0pi -e 's/\.macOS\(\.v14\)/.macOS(.v13)/g' "$VENDOR/Package.swift"
+mkdir -p "$RESOURCES" "$INSTALL_DIR"
+
+if [[ ! -f "$DER_CERT" || ! -f "$P12_CERT" ]]; then
+  print "Creating a private pairing identity for this Mac..."
+  TEMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TEMP_DIR"' EXIT
+
+  openssl req \
+    -x509 \
+    -newkey rsa:2048 \
+    -sha256 \
+    -nodes \
+    -keyout "$TEMP_DIR/key.pem" \
+    -out "$TEMP_DIR/cert.pem" \
+    -days 3650 \
+    -subj "/CN=macOS TV Remote" \
+    >/dev/null 2>&1
+
+  openssl x509 \
+    -in "$TEMP_DIR/cert.pem" \
+    -outform DER \
+    -out "$DER_CERT"
+
+  openssl pkcs12 \
+    -export \
+    -inkey "$TEMP_DIR/key.pem" \
+    -in "$TEMP_DIR/cert.pem" \
+    -out "$P12_CERT" \
+    -passout pass:tvremote
+
 fi
 
-grep -q '\.macOS(' "$VENDOR/Package.swift" || {
-  echo "❌ No pude parchear Package.swift automáticamente."
-  exit 1
-}
+chmod 600 "$DER_CERT" "$P12_CERT"
 
-cd "$ROOT"
-echo "→ Generando proyecto Xcode…"
-xcodegen generate
+print "Building macOS TV Remote..."
+xcodebuild \
+  -quiet \
+  -project "$ROOT/TVRemote.xcodeproj" \
+  -scheme TVRemote \
+  -configuration Release \
+  -derivedDataPath "$BUILD_ROOT/DerivedData" \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY=- \
+  DEVELOPMENT_TEAM= \
+  build
 
-echo
-echo "✅ Proyecto 100% Swift generado."
-echo "   TV: $HOST"
-echo "   Python/Shortcuts NO se usan en runtime."
-echo
-echo "→ Abriendo Xcode…"
-open "$ROOT/TVRemote.xcodeproj"
+[[ -d "$BUILT_APP" ]] || fail "The build completed without producing TVRemote.app."
 
-echo
-echo "En Xcode:"
-echo "  1. Scheme: TVRemote"
-echo "  2. Destination: My Mac"
-echo "  3. ⌘R"
-echo "  4. Si pide Signing, elegí tu Team en ambos targets."
-echo
-echo "Después: click hora → Edit Widgets → TV Remote → widget mediano."
+print "Installing in $INSTALL_DIR..."
+pkill -x TVRemote >/dev/null 2>&1 || true
+rm -rf "$INSTALLED_APP" "$LEGACY_APP"
+ditto "$BUILT_APP" "$INSTALLED_APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f -R -trusted "$INSTALLED_APP"
+
+open "$INSTALLED_APP"
+
+print
+print "macOS TV Remote is installed."
+print "Open the menu bar remote, enter your TV IP in Settings, and select Pair."
