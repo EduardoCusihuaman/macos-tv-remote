@@ -2,7 +2,7 @@ import AppIntents
 
 enum WidgetTVCommand: String, AppEnum {
     case up, down, left, right, ok, back, home, power
-    case volup, voldown, mute, play
+    case volup, voldown, mute, play, previous, next
 
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "TV command")
 
@@ -10,7 +10,8 @@ enum WidgetTVCommand: String, AppEnum {
         .up: "Up", .down: "Down", .left: "Left", .right: "Right",
         .ok: "OK", .back: "Back", .home: "Home", .power: "Power",
         .volup: "Volume up", .voldown: "Volume down",
-        .mute: "Mute", .play: "Play/Pause"
+        .mute: "Mute", .play: "Play/Pause",
+        .previous: "Previous chapter", .next: "Next chapter"
     ]
 
     var command: TVCommand { TVCommand(rawValue: rawValue)! }

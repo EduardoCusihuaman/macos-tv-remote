@@ -61,7 +61,7 @@ enum TVResources {
 
 enum TVCommand: String, CaseIterable {
     case up, down, left, right, ok, back, home, power
-    case volup, voldown, mute, play
+    case volup, voldown, mute, play, previous, next
 
     var key: Key {
         switch self {
@@ -77,6 +77,8 @@ enum TVCommand: String, CaseIterable {
         case .voldown: return .KEYCODE_VOLUME_DOWN
         case .mute:    return .KEYCODE_VOLUME_MUTE
         case .play:    return .KEYCODE_MEDIA_PLAY_PAUSE
+        case .previous: return .KEYCODE_MEDIA_PREVIOUS
+        case .next:     return .KEYCODE_MEDIA_NEXT
         }
     }
 }
@@ -105,10 +107,8 @@ private actor TVRemoteSession {
 
     func send(_ command: TVCommand) async throws {
         if isPaired, let remote {
-            connectionGeneration += 1
             remote.send(KeyPress(command.key))
             scheduleIdleDisconnect(generation: connectionGeneration)
-            try await Task.sleep(for: .milliseconds(35))
             return
         }
 
@@ -165,7 +165,6 @@ private actor TVRemoteSession {
                 remote?.send(KeyPress(item.command.key))
             }
 
-            try? await Task.sleep(for: .milliseconds(35))
             commands.forEach { $0.continuation.resume() }
             scheduleIdleDisconnect(generation: generation)
 
